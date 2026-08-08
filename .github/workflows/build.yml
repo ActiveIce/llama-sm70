@@ -1,0 +1,104 @@
+name: auto build engine
+
+on: 
+  release:
+    types: [published]
+  schedule:
+    - cron: "0 16 * * *"
+  push:
+    branches: 
+      - master
+  watch:
+    types: [started]
+
+env:
+  CUDA_VERSION: '12.9.2'
+   
+jobs:
+  build:
+    runs-on: windows-2025-vs2026
+
+    steps:
+    - name: Setup cmake
+      uses: jwlawson/actions-setup-cmake@master
+    
+    - name: Install ccache
+      uses: ggml-org/ccache-action@main
+      with:
+        key: windows-cuda
+        max-size: 512M
+        evict-old-files: 1d
+    
+    - name: Install Cuda Toolkit
+      shell: pwsh
+      run: |
+          $pkgs = @("cccl", "cuda_crt", "cuda_cudart", "cuda_nvcc", "libcublas", "libnvvm")
+          $arch = "windows-x86_64"
+          $cuda_path = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v" + ($env:CUDA_VERSION -replace '\.[^.]+$', '')
+          mkdir -p $cuda_path
+          choco install unzip -y
+          $cuda_url = "https://developer.download.nvidia.com/compute/cuda/redist"
+          curl -O "${cuda_url}/redistrib_${env:CUDA_VERSION}.json"
+          $json = Get-Content "redistrib_${env:CUDA_VERSION}.json" | ConvertFrom-Json
+          foreach ($pkg in $pkgs) {
+            $rel_path = $json.$pkg.$arch.relative_path
+            $url = "${cuda_url}/${rel_path}"
+            curl -O $url
+            $filename = Split-Path $url -Leaf
+            $prefix = $filename -replace '\.zip$', ''
+            unzip $filename -d $cuda_path
+            xcopy "${cuda_path}\${prefix}\*" $cuda_path /E /I /H /Y
+          }
+          echo "CUDA_PATH=$cuda_path" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          #curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cccl/windows-x86_64/cuda_cccl-windows-x86_64-13.0.85-archive.zip"
+          #curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_crt/windows-x86_64/cuda_crt-windows-x86_64-13.0.88-archive.zip"
+          #curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-13.0.96-archive.zip"
+          #curl -O "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-13.0.88-archive.zip"
+          #curl -O "https://developer.download.nvidia.com/compute/cuda/redist/libcublas/windows-x86_64/libcublas-windows-x86_64-13.1.0.3-archive.zip"
+          #curl -O "https://developer.download.nvidia.com/compute/cuda/redist/libnvvm/windows-x86_64/libnvvm-windows-x86_64-13.0.88-archive.zip"
+          #unzip '*.zip' -d "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\${cuda_ver}"
+          #xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\cuda_cccl-windows-x86_64-13.0.85-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0" /E /I /H /Y
+          #xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\cuda_crt-windows-x86_64-13.0.88-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0" /E /I /H /Y
+          #xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\cuda_cudart-windows-x86_64-13.0.96-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0" /E /I /H /Y
+          #xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\cuda_nvcc-windows-x86_64-13.0.88-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0" /E /I /H /Y
+          #xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\libcublas-windows-x86_64-13.1.0.3-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0" /E /I /H /Y
+          #xcopy "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0\libnvvm-windows-x86_64-13.0.88-archive\*" "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.0" /E /I /H /Y
+          #echo "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\${cuda_ver}" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+    
+    - name: Install Ninja
+      run: |
+        choco install ninja
+    
+    - name: Build
+      shell: cmd
+      run: |
+        git clone https://github.com/ggml-org/llama.cpp --depth 1
+        pushd llama.cpp
+        call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+        cmake -S . -B build -G "Ninja Multi-Config" ^
+          -DCMAKE_TOOLCHAIN_FILE=cmake/x64-windows-llvm.cmake ^
+          -DLLAMA_BUILD_BORINGSSL=ON ^
+          -DGGML_BACKEND_DL=ON ^
+          -DGGML_NATIVE=OFF ^
+          -DGGML_CPU=ON ^
+          -DGGML_OPENMP=ON ^
+          -DGGML_CUDA=ON ^
+          -DGGML_CUDA_FA_ALL_QUANTS=ON ^
+          -DCMAKE_CUDA_ARCHITECTURES="70-real" ^
+          -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DGGML_RPC=ON
+        set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+        cmake --build build --config Release -j %NINJA_JOBS%
+        popd
+    
+    - name: Pack artifacts
+      run: |
+        $cuda_path = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v" + ($env:CUDA_VERSION -replace '\.[^.]+$', '')
+        Copy-Item "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Redist\MSVC\14.51.36231\debug_nonredist\x64\Microsoft.VC145.OpenMP.LLVM\libomp140.x86_64.dll" .\llama.cpp\build\bin\Release\
+        robocopy "$cuda_path\bin\x64" ".\llama.cpp\build\bin\Release\" cudart64_*.dll cublas64_*.dll cublasLt64_*.dll
+        if ($lastexitcode -lt 8) {exit 0} else {exit 1}
+    
+    - name: Upload artifacts
+      uses: actions/upload-artifact@main
+      with:
+        path: .\llama.cpp\build\bin\Release\
+        name: llama-bin-win-cuda-x64
