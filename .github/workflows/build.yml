@@ -12,7 +12,7 @@ on:
     types: [started]
 
 env:
-  CUDA_VERSION: '12.8.2'
+  CUDA_VERSION: '12.8.0'
    
 jobs:
   build:
